@@ -1,0 +1,121 @@
+name: CI-MLFlow-Diabetes
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+env:
+  PROJECT_DIR: "MLProject"
+  CONTAINER_NAME: "diabetes-classification-lr"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write 
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python 3.12.7
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12.7"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run MLProject
+        run: |
+          mlflow run ${{ env.PROJECT_DIR }}/ --env-manager=local
+
+      - name: Upload MLflow results
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlflow-artifacts
+          path: mlruns/
+
+      - name: Set up Git LFS
+        if: ${{ hashFiles('mlruns/**') != '' }}
+        run: | 
+          git config --global user.name "${{ secrets.USERNAME }}"
+          git config --global user.email "${{ secrets.EMAIL }}"
+          git lfs install
+          git lfs track "mlruns/**"
+          git add .gitattributes
+          git commit -m "Track large files in mlruns with Git LFS" || true
+          git push https://${{ secrets.CI_PUSH_TOKEN }}@github.com/${{ github.repository }}.git HEAD:main
+
+      - name: Commit MLflow artifacts
+        if: ${{ hashFiles('mlruns/**') != '' }}
+        run: |
+          git config --global user.name ${{ secrets.USERNAME }}
+          git config --global user.email ${{ secrets.EMAIL }}
+          git add .gitattributes mlruns/
+          git commit -m "Track large files in mlruns with Git LFS" || echo "No changes to commit"
+          git push https://${{ secrets.CI_PUSH_TOKEN }}@github.com/${{ github.repository }}.git HEAD:main
+
+      - name: Get latest MLFlow run_id
+        run: |
+          LATEST_RUN_DIR=$(find mlruns -type d -mindepth 2 -maxdepth 2 -exec stat --format='%Y %n' {} + | sort -nr | head -n 1 | cut -d' ' -f2)
+          RUN_ID=$(basename $LATEST_RUN_DIR)
+          echo "RUN_ID=$RUN_ID" >> $GITHUB_ENV
+          echo "Latest run_id: $RUN_ID (from $LATEST_RUN_DIR)"
+
+      - name: Build Docker Model (with debug)
+        run: |
+          echo "============================="
+          echo "📂 Step: Checking mlruns structure"
+          echo "============================="
+          pwd
+          ls -al
+          echo
+          ls -R mlruns/0 || echo "❌ Directory mlruns/0 not found!"
+          echo
+
+          echo "============================="
+          echo "🔍 Step: Detect model folder (adjusted for mlruns/0/models)"
+          echo "============================="
+
+          # Cari folder yang mengandung MLmodel langsung di artifacts/
+          MODEL_PATH=$(find mlruns/0/models -type f -name "MLmodel" -printf "%h\n" | sort | tail -n 1)
+
+          if [ -z "$MODEL_PATH" ]; then
+            echo "❌ No model folder found inside mlruns/0/models/**/artifacts/"
+            exit 1
+          fi
+
+          ABS_PATH=$(realpath "$MODEL_PATH")
+          echo "✅ Detected model path: $ABS_PATH"
+          echo
+          echo "============================="
+          echo "📁 Step: Show model folder content"
+          echo "============================="
+          ls -al "$ABS_PATH"
+          echo
+          echo "============================="
+          echo "🐳 Step: Building Docker image from MLflow model"
+          echo "============================="
+          mlflow models build-docker --model-uri "file://$ABS_PATH" --name $CONTAINER_NAME
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+
+      - name: Tag Docker Image
+        run: |
+          docker tag $CONTAINER_NAME ${{ secrets.DOCKER_HUB_USERNAME }}/$CONTAINER_NAME:latest
+
+      - name: Push Docker Image
+        run: |
+          docker push ${{ secrets.DOCKER_HUB_USERNAME }}/$CONTAINER_NAME:latest
