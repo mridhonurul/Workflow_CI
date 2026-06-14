@@ -1,0 +1,10 @@
+name: diabetes-classification
+
+conda_env: conda.yaml
+
+entry_points:
+  main:
+    parameters:
+      data_file: {type: str, default: "diabetes_cleaned.csv"}
+      scaler_file: {type: str, default: "minmax_scaler.joblib"}
+    command: "python modelling.py --data_file {data_file} --scaler_file {scaler_file}"
